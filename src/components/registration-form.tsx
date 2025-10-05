@@ -299,6 +299,8 @@ export function RegistrationForm() {
                     onChange={(e) => handleFileUpload(index, e.target.files?.[0] || null)}
                     className="hidden"
                     id={`file-${index}`}
+                    placeholder="Upload document"
+                    title="Upload document"
                   />
                   <Label
                     htmlFor={`file-${index}`}

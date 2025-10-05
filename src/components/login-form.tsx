@@ -137,6 +137,8 @@ export function LoginForm() {
                   type="checkbox"
                   id="remember"
                   className="rounded border-border text-primary focus:ring-primary"
+                  title="Remember me"
+                  placeholder="Remember me"
                 />
                 <Label htmlFor="remember" className="text-sm text-muted-foreground">
                   Remember me
