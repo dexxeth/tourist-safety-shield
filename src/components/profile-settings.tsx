@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState, useCallback } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,21 +10,59 @@ import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
+import { Skeleton } from "@/components/ui/skeleton"
+import { useToast } from "@/hooks/use-toast"
 import { User, Shield, Bell, Lock, Phone, Camera, Trash2, Save, Eye, EyeOff, Plus, Edit } from "lucide-react"
 import { useAuth } from "@/lib/auth"
+import { createClient as createSupabaseBrowserClient } from "@/utils/supabase/client"
+
+type EmergencyContact = {
+  id: string
+  name: string
+  phone: string
+  relationship: string
+  is_primary?: boolean
+  _local?: boolean // not yet persisted
+}
+
+const toRelationshipEnum = (raw: string): string => {
+  if (!raw) return "other"
+  const s = String(raw).toLowerCase().trim()
+  if (["parent","father","mother","dad","mom"].includes(s)) return "parent"
+  if (["spouse","wife","husband","partner"].includes(s)) return "spouse"
+  if (["sibling","brother","sister"].includes(s)) return "sibling"
+  if (["child","son","daughter"].includes(s)) return "child"
+  if (["friend","best friend","bff"].includes(s)) return "friend"
+  if (["colleague","coworker","co-worker","work"].includes(s)) return "colleague"
+  if (["guardian","caretaker","caregiver"].includes(s)) return "guardian"
+  if (["relative","family","cousin","uncle","aunt","grandparent","grandfather","grandmother"].includes(s)) return "relative"
+  return "other"
+}
 
 export function ProfileSettings() {
   const { user, logout } = useAuth()
+  const supabase = useMemo(() => createSupabaseBrowserClient(), [])
+  const { toast } = useToast()
   const [activeTab, setActiveTab] = useState("profile")
   const [isEditing, setIsEditing] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [originalProfileData, setOriginalProfileData] = useState<any | null>(null)
+
+  // No preferences JSON in current DB schema; use explicit columns only
 
   // Profile form state
   const [profileData, setProfileData] = useState({
     name: user?.name || "",
-    email: user?.email || "",
-    phone: user?.phone || "",
-    nationality: "Indian",
+    email: (user?.email as string) || "",
+    phone: (user?.phone as string) || "",
+    nationality: "indian",
+    dateOfBirth: "",
+    gender: "",
+    address: "",
+    preferredLanguage: "",
+    medicalInfo: "",
     bio: "",
     currentPassword: "",
     newPassword: "",
@@ -32,11 +70,7 @@ export function ProfileSettings() {
   })
 
   // Emergency contacts state
-  const [emergencyContacts, setEmergencyContacts] = useState([
-    { id: 1, name: "John Doe", phone: "+91 9876543210", relationship: "Father" },
-    { id: 2, name: "Jane Doe", phone: "+91 9876543211", relationship: "Mother" },
-    { id: 3, name: "Mike Smith", phone: "+91 9876543212", relationship: "Friend" },
-  ])
+  const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([])
 
   // Privacy settings state
   const [privacySettings, setPrivacySettings] = useState({
@@ -57,19 +91,118 @@ export function ProfileSettings() {
     pushNotifications: true,
   })
 
-  const handleProfileUpdate = () => {
-    // Simulate profile update
-    alert("Profile updated successfully!")
-    setIsEditing(false)
+  const loadProfile = useCallback(async () => {
+    if (!user?.id) return
+    setIsLoading(true)
+    try {
+      // Load profile row
+      const { data: profiles, error: pErr } = await supabase
+        .from("profiles")
+        .select("full_name, email, phone, nationality, location_sharing, emergency_sharing, date_of_birth, languages, gender, address, emergency_medical_info")
+        .eq("user_id", user.id)
+        .limit(1)
+      if (pErr) throw pErr
+      const p = profiles?.[0] as any
+      if (p) {
+        setProfileData(prev => ({
+          ...prev,
+          name: p.full_name ?? user.name ?? "",
+          email: p.email ?? (user.email as string) ?? "",
+          phone: p.phone ?? (user.phone as string) ?? "",
+          nationality: (p.nationality || "indian").toLowerCase(),
+          dateOfBirth: p.date_of_birth || "",
+          preferredLanguage: (typeof p.languages === 'string' ? p.languages : Array.isArray(p.languages) ? (p.languages[0] ?? '') : '') || "",
+          gender: p.gender ?? "",
+          address: typeof p.address === 'string' ? p.address : p.address ? JSON.stringify(p.address) : "",
+          medicalInfo: p.emergency_medical_info ?? "",
+        }))
+        setPrivacySettings(prev => ({
+          ...prev,
+          locationTracking: Boolean(p.location_sharing ?? true),
+          shareWithEmergencyContacts: Boolean(p.emergency_sharing ?? true),
+        }))
+      }
+
+      // Load emergency contacts
+      const { data: contacts, error: cErr } = await supabase
+        .from("emergency_contacts")
+        .select("id,name,phone,relationship,is_primary,created_at")
+        .eq("user_id", user.id)
+        .order("is_primary", { ascending: false })
+        .order("created_at", { ascending: true })
+      if (cErr) throw cErr
+      setEmergencyContacts(((contacts || []) as any[]).map((c) => ({
+        id: c.id as string,
+        name: c.name as string,
+        phone: c.phone as string,
+        relationship: c.relationship as string,
+        is_primary: c.is_primary as boolean,
+      })))
+    } catch (e) {
+      console.error("Load profile error:", e)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [supabase, user])
+
+  useEffect(() => {
+    loadProfile()
+  }, [loadProfile])
+
+  const handleProfileUpdate = async () => {
+    if (!user?.id) return
+    setSaving(true)
+    try {
+      // Optionally update auth email if changed
+      if (profileData.email && profileData.email !== user.email) {
+        const { error: emailErr } = await supabase.auth.updateUser({ email: profileData.email })
+        if (emailErr) {
+          console.warn("Auth email update failed:", emailErr.message)
+        }
+      }
+      // Update profiles table using explicit columns only (no preferences JSON)
+      const updatePayload: any = {
+        full_name: profileData.name,
+        phone: profileData.phone || null,
+        nationality: (profileData.nationality || "indian").toLowerCase(),
+        email: profileData.email || undefined,
+        date_of_birth: profileData.dateOfBirth || null,
+        languages: profileData.preferredLanguage || null,
+        gender: profileData.gender || null,
+        address: profileData.address || null,
+        emergency_medical_info: profileData.medicalInfo || null,
+      }
+
+      const { error: upErr } = await supabase
+        .from("profiles")
+        .update(updatePayload)
+        .eq("user_id", user.id)
+      if (upErr) throw upErr
+      // feedback via toast is handled by caller
+      setIsEditing(false)
+      await loadProfile()
+    } catch (e: any) {
+      console.error("Profile update error:", e)
+      toast({ title: 'Failed to update profile', description: e?.message || String(e) })
+    } finally {
+      setSaving(false)
+    }
   }
 
-  const handlePasswordChange = () => {
+  const handlePasswordChange = async () => {
     if (profileData.newPassword !== profileData.confirmPassword) {
       alert("New passwords do not match!")
       return
     }
-    alert("Password changed successfully!")
-    setProfileData({ ...profileData, currentPassword: "", newPassword: "", confirmPassword: "" })
+    try {
+      const { error } = await supabase.auth.updateUser({ password: profileData.newPassword })
+      if (error) throw error
+      alert("Password changed successfully!")
+      setProfileData({ ...profileData, currentPassword: "", newPassword: "", confirmPassword: "" })
+    } catch (e: any) {
+      console.error("Password change error:", e)
+      alert(`Failed to change password: ${e?.message || e}`)
+    }
   }
 
   const handleDeleteAccount = () => {
@@ -82,23 +215,92 @@ export function ProfileSettings() {
   }
 
   const addEmergencyContact = () => {
-    const newContact = {
-      id: Date.now(),
+    const newContact: EmergencyContact = {
+      id: `local-${Date.now()}`,
       name: "",
       phone: "",
-      relationship: "",
+      relationship: "other",
+      _local: true,
     }
     setEmergencyContacts([...emergencyContacts, newContact])
   }
 
-  const updateEmergencyContact = (id: number, field: string, value: string) => {
+  const updateEmergencyContact = (id: string, field: string, value: string) => {
     setEmergencyContacts(
       emergencyContacts.map((contact) => (contact.id === id ? { ...contact, [field]: value } : contact)),
     )
   }
 
-  const removeEmergencyContact = (id: number) => {
-    setEmergencyContacts(emergencyContacts.filter((contact) => contact.id !== id))
+  const removeEmergencyContact = async (id: string) => {
+    if (String(id).startsWith("local-")) {
+      setEmergencyContacts(emergencyContacts.filter((c) => c.id !== id))
+      return
+    }
+    try {
+      const { error } = await supabase.from("emergency_contacts").delete().eq("id", id)
+      if (error) throw error
+      setEmergencyContacts(emergencyContacts.filter((c) => c.id !== id))
+    } catch (e: any) {
+      console.error("Delete contact error:", e)
+      alert(`Failed to delete contact: ${e?.message || e}`)
+    }
+  }
+
+  const saveEmergencyContact = async (contact: EmergencyContact) => {
+    if (!user?.id) return
+    if (!contact.name || !contact.phone) {
+      alert("Please fill name and phone")
+      return
+    }
+    try {
+      if (String(contact.id).startsWith("local-")) {
+        // Insert
+        const { data, error } = await supabase
+          .from("emergency_contacts")
+          .insert({
+            user_id: user.id,
+            name: contact.name,
+            phone: contact.phone,
+            email: "",
+            relationship: toRelationshipEnum(contact.relationship),
+            is_primary: false,
+          })
+          .select("id")
+          .single()
+        if (error) throw error
+        setEmergencyContacts((prev) => prev.map((c) => (c.id === contact.id ? { ...contact, id: data!.id as string, _local: false } : c)))
+      } else {
+        // Update
+        const { error } = await supabase
+          .from("emergency_contacts")
+          .update({
+            name: contact.name,
+            phone: contact.phone,
+            relationship: toRelationshipEnum(contact.relationship),
+          })
+          .eq("id", contact.id as string)
+        if (error) throw error
+      }
+      alert("Contact saved")
+    } catch (e: any) {
+      console.error("Save contact error:", e)
+      alert(`Failed to save contact: ${e?.message || e}`)
+    }
+  }
+
+  const updatePrivacyFlag = async (key: "locationTracking" | "shareWithEmergencyContacts", value: boolean) => {
+    setPrivacySettings({ ...privacySettings, [key]: value })
+    try {
+      if (!user?.id) return
+      const payload: any = {}
+      if (key === "locationTracking") payload.location_sharing = value
+      if (key === "shareWithEmergencyContacts") payload.emergency_sharing = value
+      const { error } = await supabase.from("profiles").update(payload).eq("user_id", user.id)
+      if (error) throw error
+    } catch (e: any) {
+      console.error("Update privacy error:", e)
+      alert(`Failed to update setting: ${e?.message || e}`)
+    }
   }
 
   if (!user) return null
@@ -121,22 +323,46 @@ export function ProfileSettings() {
                 <User className="h-5 w-5 mr-2" />
                 Personal Information
               </div>
-              <Button variant="outline" size="sm" onClick={() => setIsEditing(!isEditing)} className="bg-transparent">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (!isEditing) setOriginalProfileData(profileData)
+                  setIsEditing(!isEditing)
+                }}
+                className="bg-transparent"
+              >
                 <Edit className="h-4 w-4 mr-2" />
                 {isEditing ? "Cancel" : "Edit"}
               </Button>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
+            {isLoading && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-4">
+                  <Skeleton className="h-20 w-20 rounded-full" />
+                  <div className="space-y-2 w-full">
+                    <Skeleton className="h-8 w-40" />
+                    <Skeleton className="h-3 w-60" />
+                  </div>
+                </div>
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-24 w-full" />
+              </div>
+            )}
+            {!isLoading && (
+            <>
             {/* Profile Picture */}
             <div className="flex items-center space-x-4">
               <div className="w-20 h-20 bg-muted rounded-full flex items-center justify-center">
                 <span className="text-2xl font-bold text-muted-foreground">
-                  {user.name
+                  {(user.name || "?")
                     .split(" ")
-                    .map((n) => n[0])
+                    .map((n: string) => (n && n[0]) || "")
                     .join("")
-                    .toUpperCase()}
+                    .toUpperCase() || "?"}
                 </span>
               </div>
               <div>
@@ -157,6 +383,7 @@ export function ProfileSettings() {
                   value={profileData.name}
                   onChange={(e) => setProfileData({ ...profileData, name: e.target.value })}
                   disabled={!isEditing}
+                  placeholder="Your full legal name"
                 />
               </div>
               <div>
@@ -188,6 +415,7 @@ export function ProfileSettings() {
                   value={profileData.email}
                   onChange={(e) => setProfileData({ ...profileData, email: e.target.value })}
                   disabled={!isEditing}
+                  placeholder="you@example.com"
                 />
               </div>
               <div>
@@ -198,6 +426,7 @@ export function ProfileSettings() {
                   value={profileData.phone}
                   onChange={(e) => setProfileData({ ...profileData, phone: e.target.value })}
                   disabled={!isEditing}
+                  placeholder="Include country code if needed"
                 />
               </div>
             </div>
@@ -209,6 +438,85 @@ export function ProfileSettings() {
                 placeholder="Tell us about yourself..."
                 value={profileData.bio}
                 onChange={(e) => setProfileData({ ...profileData, bio: e.target.value })}
+                disabled={!isEditing}
+              />
+            </div>
+
+            {/* Additional Information */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="dob">Date of Birth</Label>
+                <Input
+                  id="dob"
+                  type="date"
+                  value={profileData.dateOfBirth}
+                  onChange={(e) => setProfileData({ ...profileData, dateOfBirth: e.target.value })}
+                  disabled={!isEditing}
+                />
+              </div>
+              <div>
+                <Label htmlFor="gender">Gender</Label>
+                <Select
+                  value={profileData.gender}
+                  onValueChange={(value) => setProfileData({ ...profileData, gender: value })}
+                  disabled={!isEditing}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="male">Male</SelectItem>
+                    <SelectItem value="female">Female</SelectItem>
+                    <SelectItem value="non_binary">Non-binary</SelectItem>
+                    <SelectItem value="prefer_not">Prefer not to say</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="address">Address</Label>
+                <Textarea
+                  id="address"
+                  placeholder="Street, City, State, Country"
+                  value={profileData.address}
+                  onChange={(e) => setProfileData({ ...profileData, address: e.target.value })}
+                  disabled={!isEditing}
+                />
+              </div>
+              <div>
+                <Label htmlFor="preferred-language">Preferred Language</Label>
+                <Select
+                  value={profileData.preferredLanguage}
+                  onValueChange={(value) => setProfileData({ ...profileData, preferredLanguage: value })}
+                  disabled={!isEditing}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="en">English</SelectItem>
+                    <SelectItem value="hi">Hindi</SelectItem>
+                    <SelectItem value="es">Spanish</SelectItem>
+                    <SelectItem value="fr">French</SelectItem>
+                    <SelectItem value="de">German</SelectItem>
+                    <SelectItem value="zh">Chinese</SelectItem>
+                    <SelectItem value="ar">Arabic</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div>
+              <Label htmlFor="medical-info">Emergency Medical Info</Label>
+              <Textarea
+                id="medical-info"
+                placeholder="Allergies, medications, conditions, blood type, emergency notes"
+                value={profileData.medicalInfo}
+                onChange={(e) => setProfileData({ ...profileData, medicalInfo: e.target.value })}
                 disabled={!isEditing}
               />
             </div>
@@ -231,10 +539,38 @@ export function ProfileSettings() {
             </div>
 
             {isEditing && (
-              <Button onClick={handleProfileUpdate} className="w-full">
-                <Save className="h-4 w-4 mr-2" />
-                Save Changes
-              </Button>
+              <div className="flex gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="bg-transparent w-1/3"
+                  onClick={() => {
+                    if (originalProfileData) setProfileData(originalProfileData)
+                    setIsEditing(false)
+                  }}
+                  disabled={saving}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={async () => {
+                    const emailValid = !profileData.email || /.+@.+\..+/.test(profileData.email)
+                    if (!emailValid) {
+                      toast({ title: 'Invalid email', description: 'Please enter a valid email address.' })
+                      return
+                    }
+                    await handleProfileUpdate()
+                    toast({ title: 'Profile updated', description: 'Your changes have been saved.' })
+                  }}
+                  className="w-2/3"
+                  disabled={saving}
+                >
+                  <Save className="h-4 w-4 mr-2" />
+                  {saving ? "Saving..." : "Save Changes"}
+                </Button>
+              </div>
+            )}
+            </>
             )}
           </CardContent>
         </Card>
@@ -254,6 +590,11 @@ export function ProfileSettings() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {emergencyContacts.length === 0 && (
+              <div className="p-4 border border-dashed rounded-lg text-sm text-muted-foreground">
+                You haven’t added any emergency contacts yet.
+              </div>
+            )}
             {emergencyContacts.map((contact) => (
               <div key={contact.id} className="border border-border rounded-lg p-3">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -278,18 +619,66 @@ export function ProfileSettings() {
                       <SelectItem value="parent">Parent</SelectItem>
                       <SelectItem value="spouse">Spouse</SelectItem>
                       <SelectItem value="sibling">Sibling</SelectItem>
+                      <SelectItem value="child">Child</SelectItem>
+                      <SelectItem value="colleague">Colleague</SelectItem>
+                      <SelectItem value="guardian">Guardian</SelectItem>
+                      <SelectItem value="relative">Relative</SelectItem>
                       <SelectItem value="friend">Friend</SelectItem>
                       <SelectItem value="other">Other</SelectItem>
                     </SelectContent>
                   </Select>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="bg-transparent"
+                      onClick={() => saveEmergencyContact(contact)}
+                      disabled={!contact.name || !contact.phone}
+                    >
+                      <Save className="h-4 w-4 mr-2" />
+                      Save
+                    </Button>
+                    {contact.is_primary ? (
+                      <Badge variant="secondary" className="bg-green-100 text-green-800">Primary</Badge>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="bg-transparent"
+                        onClick={async () => {
+                          if (!user?.id) return
+                          try {
+                            await supabase.from('emergency_contacts').update({ is_primary: false }).eq('user_id', user.id)
+                            await supabase.from('emergency_contacts').update({ is_primary: true }).eq('id', contact.id)
+                            toast({ title: 'Primary contact updated' })
+                            const { data: contacts } = await supabase
+                              .from('emergency_contacts')
+                              .select('id,name,phone,relationship,is_primary,created_at')
+                              .eq('user_id', user.id)
+                              .order('is_primary', { ascending: false })
+                              .order('created_at', { ascending: true })
+                            setEmergencyContacts(((contacts || []) as any[]).map((c) => ({ id: c.id, name: c.name, phone: c.phone, relationship: c.relationship, is_primary: c.is_primary })))
+                          } catch (e: any) {
+                            console.error(e)
+                            toast({ title: 'Failed to set primary', description: e?.message || String(e) })
+                          }
+                        }}
+                      >
+                        Make Primary
+                      </Button>
+                    )}
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => removeEmergencyContact(contact.id)}
+                    onClick={() => {
+                      const confirmed = confirm('Remove this contact?')
+                      if (confirmed) removeEmergencyContact(contact.id)
+                    }}
                     className="text-destructive hover:text-destructive"
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -318,7 +707,7 @@ export function ProfileSettings() {
                 <Switch
                   id="location-tracking"
                   checked={privacySettings.locationTracking}
-                  onCheckedChange={(checked) => setPrivacySettings({ ...privacySettings, locationTracking: checked })}
+                  onCheckedChange={(checked) => updatePrivacyFlag("locationTracking", checked)}
                 />
               </div>
 
@@ -330,9 +719,7 @@ export function ProfileSettings() {
                 <Switch
                   id="share-emergency"
                   checked={privacySettings.shareWithEmergencyContacts}
-                  onCheckedChange={(checked) =>
-                    setPrivacySettings({ ...privacySettings, shareWithEmergencyContacts: checked })
-                  }
+                  onCheckedChange={(checked) => updatePrivacyFlag("shareWithEmergencyContacts", checked)}
                 />
               </div>
 

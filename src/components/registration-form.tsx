@@ -106,6 +106,15 @@ export function RegistrationForm() {
     }
 
     try {
+      console.log("Submitting registration with data:", {
+        name: formData.name,
+        email: formData.email,
+        phone: formData.phone,
+        nationality: formData.nationality,
+        emergencyContactsCount: filledContacts.length,
+        idDocumentsCount: idDocuments.filter((doc) => doc.type && doc.number).length
+      })
+
       const success = await register({
         ...formData,
         emergencyContacts: filledContacts,
@@ -113,14 +122,21 @@ export function RegistrationForm() {
       })
 
       if (success) {
-        alert("Registration successful! Redirecting to dashboard...")
-        router.push("/dashboard")
+        // Check console for email confirmation status
+        alert("Registration successful! If email confirmation is enabled, please check your email. Otherwise, you'll be redirected to dashboard.")
+        console.log("Registration successful")
+        
+        // Wait a moment for potential session creation
+        setTimeout(() => {
+          // Try to redirect to dashboard, will redirect to login if no session
+          window.location.href = "/dashboard"
+        }, 2000)
       } else {
         alert("Registration failed. Please try again.")
       }
     } catch (error) {
       console.error("Registration error:", error)
-      alert("Registration failed. Please try again.")
+      alert(`Registration failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
     } finally {
       setIsSubmitting(false)
     }

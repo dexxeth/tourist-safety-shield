@@ -49,7 +49,7 @@ export function LoginForm() {
       } else {
         toast({
           title: "Login failed",
-          description: "Please check your credentials and try again.",
+          description: loginMethod === "phone" ? "Phone login requires OTP flow (not yet enabled). Please use email." : "Please check your credentials and try again.",
         })
       }
     } catch (err) {

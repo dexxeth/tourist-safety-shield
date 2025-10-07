@@ -5,72 +5,51 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Hotel, MapPin, Star, Shield, Search } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { listAccommodations } from "@/lib/data"
 
 interface Accommodation {
   id: string
   name: string
   type: "hotel" | "hostel" | "guesthouse"
-  rating: number
-  safetyScore: number
-  distance: string
-  price: string
+  rating: number | null
+  safety_score: number | null
+  price_text: string | null
   verified: boolean
-  amenities: string[]
+  amenities: string[] | null
+  area: string | null
+  city: string | null
 }
 
 export function AccommodationFinder() {
   const [searchQuery, setSearchQuery] = useState("")
   const [isSearching, setIsSearching] = useState(false)
+  const [accommodations, setAccommodations] = useState<Accommodation[]>([])
 
-  const nearbyAccommodations: Accommodation[] = [
-    {
-      id: "acc1",
-      name: "The Taj Mahal Palace",
-      type: "hotel",
-      rating: 4.8,
-      safetyScore: 95,
-      distance: "0.5 km",
-      price: "₹15,000/night",
-      verified: true,
-      amenities: ["24/7 Security", "CCTV", "Tourist Police Contact"],
-    },
-    {
-      id: "acc2",
-      name: "Backpacker Panda",
-      type: "hostel",
-      rating: 4.2,
-      safetyScore: 82,
-      distance: "1.2 km",
-      price: "₹800/night",
-      verified: true,
-      amenities: ["Lockers", "Security Guard", "Safe Area"],
-    },
-    {
-      id: "acc3",
-      name: "Sea View Guest House",
-      type: "guesthouse",
-      rating: 4.0,
-      safetyScore: 78,
-      distance: "0.8 km",
-      price: "₹2,500/night",
-      verified: false,
-      amenities: ["Basic Security", "Tourist Area"],
-    },
-  ]
+  useEffect(() => {
+    let mounted = true
+    ;(async () => {
+      try {
+        const rows = await listAccommodations()
+        if (!mounted) return
+        setAccommodations(rows as unknown as Accommodation[])
+      } catch {}
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   const handleSearch = () => {
     setIsSearching(true)
     setTimeout(() => {
       setIsSearching(false)
-      alert(
-        `Searching for accommodations: "${searchQuery}"\n\nResults will be filtered by safety score and verification status.`,
-      )
-    }, 1500)
+      // Filtering/search can be implemented via supabase full-text or LIKE queries later.
+    }, 800)
   }
 
   const handleBooking = (accommodationId: string) => {
-    const accommodation = nearbyAccommodations.find((acc) => acc.id === accommodationId)
+    const accommodation = accommodations.find((acc) => acc.id === accommodationId)
     alert(
       `Booking request for ${accommodation?.name}\n\nYou will be redirected to secure booking with verified safety standards.`,
     )
@@ -115,7 +94,7 @@ export function AccommodationFinder() {
         <div>
           <h4 className="font-medium text-foreground mb-3">Nearby Safe Accommodations</h4>
           <div className="space-y-3">
-            {nearbyAccommodations.map((accommodation) => (
+            {accommodations.map((accommodation) => (
               <div key={accommodation.id} className="border border-border rounded-lg p-3 space-y-2">
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
@@ -127,25 +106,25 @@ export function AccommodationFinder() {
                       <Badge className={getTypeColor(accommodation.type)}>{accommodation.type}</Badge>
                       <div className="flex items-center space-x-1">
                         <Star className="h-3 w-3 text-yellow-500 fill-current" />
-                        <span className="text-sm text-muted-foreground">{accommodation.rating}</span>
+                        <span className="text-sm text-muted-foreground">{accommodation.rating ?? "-"}</span>
                       </div>
                       <div className="flex items-center space-x-1">
                         <Shield className="h-3 w-3 text-green-600" />
-                        <span className="text-sm text-green-600">{accommodation.safetyScore}</span>
+                        <span className="text-sm text-green-600">{accommodation.safety_score ?? "-"}</span>
                       </div>
                     </div>
                     <div className="flex items-center space-x-4 text-sm text-muted-foreground mb-2">
                       <span className="flex items-center">
                         <MapPin className="h-3 w-3 mr-1" />
-                        {accommodation.distance}
+                        {accommodation.area ?? ""}
                       </span>
-                      <span className="font-medium text-foreground">{accommodation.price}</span>
+                      <span className="font-medium text-foreground">{accommodation.price_text ?? ""}</span>
                     </div>
                   </div>
                 </div>
 
                 <div className="flex flex-wrap gap-1 mb-2">
-                  {accommodation.amenities.map((amenity, index) => (
+                  {(accommodation.amenities ?? []).map((amenity, index) => (
                     <Badge key={index} variant="secondary" className="text-xs">
                       {amenity}
                     </Badge>
